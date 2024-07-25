@@ -142,7 +142,7 @@ abstract class Mobilpay_Payment_Request_Abstract
 		return $objPmReq;
 	}
 	
-	static public function factoryFromEncrypted($envKey, $encData, $privateKeyFilePath, $privateKeyPassword = null)
+	static public function factoryFromEncrypted($envKey, $encData, $privateKeyFilePath, $privateKeyPassword = null, $cipher_algo = 'rc4', $iv = null)
 	{
 		$privateKey = null;
 		if($privateKeyPassword == null)
@@ -170,9 +170,22 @@ abstract class Mobilpay_Payment_Request_Abstract
 		{
 			throw new Exception('Failed decoding envelope key', self::ERROR_CONFIRM_FAILED_DECODING_ENVELOPE_KEY);
 		}
+		$srcIv = base64_decode($iv);
+		if($srcIv === false)
+		{
+			throw new Exception('Failed decoding initialization vector', self::ERROR_CONFIRM_FAILED_DECODING_IV);
+		}
 		
 		$data = null;
-		$result = @openssl_open($srcData, $data, $srcEnvKey, $privateKey);
+		if(PHP_VERSION_ID >= 70000)
+		{
+			$result = @openssl_open($srcData, $data, $srcEnvKey, $privateKey, $cipher_algo, $srcIv);
+		}
+		else
+		{
+			$result = @openssl_open($srcData, $data, $srcEnvKey, $privateKey, $cipher_algo);
+		}
+		
 		if($result === false)
 		{
 			throw new Exception('Failed decrypting data', self::ERROR_CONFIRM_FAILED_DECRYPT_DATA);
@@ -314,6 +327,8 @@ abstract class Mobilpay_Payment_Request_Abstract
 		{
 			$this->outEncData	= null;
 			$this->outEnvKey	= null;
+			$this->outCipher	= null;
+			$this->outIv		= null;
 			$errorMessage = "Error while loading X509 public key certificate! Reason:";
 			while(($errorString = openssl_error_string()))
 			{
@@ -325,11 +340,70 @@ abstract class Mobilpay_Payment_Request_Abstract
 		$publicKeys	= array($publicKey);
 		$encData 	= null;
 		$envKeys 	= null;
-		$result 	= openssl_seal($srcData, $encData, $envKeys, $publicKeys);
+		$cipher_algo 	= 'rc4';
+		$iv 			= null;
+
+		if(PHP_VERSION_ID >= 70000)
+		{
+			if(OPENSSL_VERSION_NUMBER > 0x10000000)
+			{
+				$cipher_algo = 'aes-256-cbc';
+			}	
+		}
+		else
+		{
+			if(OPENSSL_VERSION_NUMBER >= 0x30000000)
+			{
+				$this->outEncData 	= null;
+				$this->outEnvKey 	= null;
+				$this->outCipher 	= null;
+				$this->outIv 		= null;
+				$errorMessage 		= 'incompatible configuration PHP ' . PHP_VERSION . ' & ' . OPENSSL_VERSION_TEXT;
+				throw new Exception($errorMessage, self::ERROR_REQUIRED_CIPHER_NOT_AVAILABLE);
+			}
+		}
+
+		$opensslCipherMethods = openssl_get_cipher_methods();
+		if(in_array($cipher_algo, $opensslCipherMethods))
+		{
+		}
+		else if(in_array(strtoupper($cipher_algo), $opensslCipherMethods))
+		{
+			$cipher_algo = strtoupper($cipher_algo);
+		}
+		else
+		{
+			$this->outEncData 	= null;
+			$this->outEnvKey 	= null;
+			$this->outCipher 	= null;
+			$this->outIv 		= null;
+			$errorMessage 		= '`' . $cipher_algo . '` required cipher is not available';
+			throw new Exception($errorMessage, self::ERROR_REQUIRED_CIPHER_NOT_AVAILABLE);
+		}
+
+		if($this->ipnCipher === null)
+		{
+			$this->ipnCipher = $cipher_algo;
+		}
+
+		$this->_prepare();
+		$srcData = $this->_xmlDoc->saveXML();
+		if(PHP_VERSION_ID >= 70000)
+		{
+			$result = openssl_seal($srcData, $encData, $envKeys, $publicKeys, $cipher_algo, $iv);
+		}
+		else
+		{
+			$result = openssl_seal($srcData, $encData, $envKeys, $publicKeys, $cipher_algo);
+		}
+
+		// $result 	= openssl_seal($srcData, $encData, $envKeys, $publicKeys);
 		if($result === false)
 		{
 			$this->outEncData	= null;
 			$this->outEnvKey	= null;
+			$this->outCipher 	= null;
+			$this->outIv 		= null;
 			$errorMessage = "Error while encrypting data! Reason:";
 			while(($errorString = openssl_error_string()))
 			{
@@ -340,6 +414,8 @@ abstract class Mobilpay_Payment_Request_Abstract
 		
 		$this->outEncData 	= base64_encode($encData);
 		$this->outEnvKey 	= base64_encode($envKeys[0]);
+		$this->outCipher 	= $cipher_algo;
+		$this->outIv 		= (strlen($iv) > 0) ? base64_encode($iv) : '';
 	}
 
 	public function getEnvKey()
@@ -350,6 +426,23 @@ abstract class Mobilpay_Payment_Request_Abstract
 	public function getEncData()
 	{
 		return $this->outEncData;
+	}
+
+	/**
+	 * Return cipher algorithm used to encrypt data
+	 * @return string
+	 */
+	public function getCipher()
+	{
+		return $this->outCipher;
+	}
+
+	/**
+	 * Return initialization vector seed used to encrypt data
+	 */
+	public function getIv()
+	{
+		return $this->outIv;
 	}
 	
 	public function getRequestIdentifier()
